@@ -102,11 +102,17 @@ $("go").onclick = async () => {
     await initEngine();
     const me = await (await fetch(API + "/api/account", {headers: {Authorization: "Bearer " + token}})).json();
     $("status").textContent = "Waiting for a game to start on Lichess...";
-    for await (const ev of ndjson(API + "/api/stream/event", token)) {
-      if (ev.type === "gameStart") {
-        await playGame(ev.game.gameId, me.id, token);
-        $("status").textContent = "Waiting for next game...";
-      }
+      let current = null;
+    while (true) {
+      try {
+        const d = await (await fetch(API + "/api/account/playing", {headers: {Authorization: "Bearer " + token}})).json();
+        const g = d.nowPlaying && d.nowPlaying[0];
+        if (g && g.gameId !== current) {
+          current = g.gameId;
+          playGame(g.gameId, me.id, token).catch(e => $("status").textContent = "Error: " + e.message);
+        }
+      } catch (e) {}
+      await new Promise(r => setTimeout(r, 5000));
     }
   } catch (e) { $("status").textContent = "Error: " + e.message; }
 };
