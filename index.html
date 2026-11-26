@@ -1,129 +1,231 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chess Practice</title>
+<html><head><meta charset="utf-8"><title>Lichess Best Move Helper</title>
 <style>
-body{font-family:sans-serif;background:#161512;color:#eee;max-width:480px;margin:auto;padding:16px}
-select,button{padding:10px;font-size:15px;border-radius:8px;border:0}
-button{background:#629924;color:#fff}
-.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-#board{display:grid;grid-template-columns:repeat(8,1fr);aspect-ratio:1;width:100%}
-.sq{display:flex;align-items:center;justify-content:center;font-size:min(10vw,44px);cursor:pointer;color:#000;padding:0;border-radius:0;aspect-ratio:1;line-height:1}
-.l{background:#f0d9b5}.d{background:#b58863}
-.sel{box-shadow:inset 0 0 0 4px #1565c0}.hint{box-shadow:inset 0 0 0 4px #2e7d32}
-.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000}
-#status,#info{text-align:center;margin:8px 0}
+body{font-family:sans-serif;background:#222;color:#eee;margin:20px}
+input,button{padding:6px;margin:2px}
+#wrap{display:flex;gap:20px;margin-top:12px;flex-wrap:wrap}
+#boardBox{position:relative;width:512px;height:512px}
+#board{display:grid;grid-template-columns:repeat(8,64px);grid-template-rows:repeat(8,64px)}
+.sq{width:64px;height:64px;font-size:46px;text-align:center;line-height:64px}
+.l{background:#f0d9b5;color:#000}.d{background:#b58863;color:#000}
+#arrows{position:absolute;top:0;left:0;width:512px;height:512px;pointer-events:none}
+#moves{width:320px;max-height:512px;overflow:auto}
+.mv{cursor:pointer;padding:3px 6px;border-bottom:1px solid #444}
+.mv:hover{background:#444}.sel{background:#335}
+#status{color:#9cf;margin:6px 0}
+#best{font-size:24px;font-weight:bold;color:#2ecc40;margin:10px 0}
 </style></head><body>
-<h2>Chess Practice vs Stockfish</h2>
-<div class="row">
-  <select id="color"><option value="w">White</option><option value="b">Black</option></select>
-  <select id="level"><option value="1">Easy</option><option value="8" selected>Medium</option><option value="20">Hard</option></select>
-  <button id="new">New game</button>
-  <button id="hintBtn">Best move</button>
-  <button id="undo">Undo</button>
+<h2>Lichess Best Move Helper</h2>
+<div>
+ <input id="token" type="password" placeholder="Lichess API token" size="30">
+ <input id="gid" placeholder="Game ID (optional)" size="16">
+ <label><input type="checkbox" id="fin"> finished game (no token needed)</label>
+ <button onclick="start()">Connect</button>
+ <button onclick="analyseHere()">Analyse this position</button>
 </div>
-<div id="status">Loading engine...</div>
-<div id="board"></div>
+<div>
+ <label><input type="checkbox" id="agreed" onchange="render();runQueue()"> My opponent agreed to engine help</label>
+</div>
+<div id="status">Not connected.</div>
 <div id="info"></div>
+<div id="best"></div>
+<div id="wrap">
+ <div id="boardBox"><div id="board"></div>
+  <svg id="arrows" viewBox="0 0 8 8">
+   <defs>
+    <marker id="mg" markerWidth="4" markerHeight="4" refX="2.6" refY="2" orient="auto"><path d="M0,0L4,2L0,4z" fill="#2ecc40"/></marker>
+    <marker id="mo" markerWidth="4" markerHeight="4" refX="2.6" refY="2" orient="auto"><path d="M0,0L4,2L0,4z" fill="#ff851b"/></marker>
+   </defs><g id="ag"></g></svg>
+ </div>
+ <div id="moves"></div>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
 <script>
-const $ = id => document.getElementById(id);
-const GLYPH = {p:"♟",n:"♞",b:"♝",r:"♜",q:"♛",k:"♚"};
-let engine, chess, me = "w", selected = null, hint = null, busy = true, gameNo = 0;
-let queue = Promise.resolve();
-
-async function initEngine() {
-  const r = await fetch("https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js");
-  if (!r.ok) throw new Error("Engine download failed: " + r.status);
-  engine = new Worker(URL.createObjectURL(new Blob([await r.text()], {type: "application/javascript"})));
-  engine.postMessage("uci");
-}
-
-// Ek waqt mein sirf ek search, taake jawab mix na hon
-function search(fen, skill) {
-  const job = queue.then(() => new Promise(res => {
-    let score = "";
-    engine.onmessage = e => {
-      const l = String(e.data);
-      const m = l.match(/score (cp|mate) (-?\d+)/);
-      if (m) score = m[1] === "cp" ? (m[2] / 100).toFixed(2) : "mate " + m[2];
-      if (l.startsWith("bestmove")) res({move: l.split(" ")[1], score});
-    };
-    engine.postMessage("setoption name Skill Level value " + skill);
-    engine.postMessage("position fen " + fen);
-    engine.postMessage("go movetime 800");
-  }));
-  queue = job;
-  return job;
-}
-
-const parse = u => ({from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4]});
-
-function render() {
-  const b = $("board"); b.innerHTML = "";
-  for (let i = 0; i < 64; i++) {
-    const row = Math.floor(i / 8), col = i % 8;
-    const f = me === "w" ? col : 7 - col, rank = me === "w" ? 8 - row : row + 1;
-    const sq = "abcdefgh"[f] + rank, p = chess.get(sq);
-    const el = document.createElement("div");
-    el.className = "sq " + ((row + col) % 2 ? "d" : "l") + (p && p.color === "w" ? " w" : "") +
-      (sq === selected ? " sel" : "") + (hint && (sq === hint.from || sq === hint.to) ? " hint" : "");
-    el.textContent = p ? GLYPH[p.type] + "︎" : "";
-    el.dataset.sq = sq;
-    el.onclick = () => click(sq);
-    b.appendChild(el);
+/* ---------- Engine (Stockfish in a Web Worker) ---------- */
+const SF='https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js';
+const sf=new Worker(URL.createObjectURL(new Blob([`importScripts('${SF}')`],{type:'application/javascript'})));
+let job=null;
+sf.onmessage=e=>{
+  const l=String(e.data); if(!job) return;
+  if(l.startsWith('info')&&l.includes(' score ')){
+    const m=l.match(/score (cp|mate) (-?\d+)/); if(m) job.score={t:m[1],v:+m[2]};
+  } else if(l.startsWith('bestmove')){
+    const j=job; job=null; j.res({best:l.split(' ')[1],...j.score});
   }
-  $("status").textContent =
-    chess.in_checkmate() ? (chess.turn() === me ? "Checkmate, you lost" : "Checkmate, you won!") :
-    chess.game_over() ? "Draw" :
-    chess.turn() === me ? "Your turn" + (chess.in_check() ? " (check)" : "") : "Computer is thinking...";
-}
-
-async function engineTurn() {
-  if (chess.game_over()) { busy = false; return; }
-  busy = true;
-  const id = gameNo;
-  const {move} = await search(chess.fen(), $("level").value);
-  if (id !== gameNo) return;
-  chess.move(parse(move));
-  busy = false; render();
-}
-
-function click(sq) {
-  if (busy || chess.game_over() || chess.turn() !== me) return;
-  const p = chess.get(sq);
-  if (p && p.color === me) { selected = sq; return render(); }
-  if (!selected) return;
-  const mv = chess.move({from: selected, to: sq, promotion: "q"});
-  selected = null;
-  if (mv) { hint = null; $("info").textContent = ""; }
-  render();
-  if (mv) engineTurn();
-}
-
-function newGame() {
-  gameNo++; chess = new Chess(); me = $("color").value; selected = hint = null;
-  $("info").textContent = ""; busy = false; render();
-  if (me === "b") engineTurn();
-}
-
-$("new").onclick = () => { if (engine) newGame(); };
-$("hintBtn").onclick = async () => {
-  if (busy || chess.game_over()) return;
-  busy = true; $("info").textContent = "Thinking...";
-  const id = gameNo;
-  const {move, score} = await search(chess.fen(), 20);
-  if (id !== gameNo) return;
-  hint = parse(move);
-  const m = chess.move(hint); chess.undo();
-  busy = false; render();
-  $("info").textContent = "Best: " + m.san + "  |  eval: " + score;
 };
-$("undo").onclick = () => {
-  if (busy || chess.history().length < (me === "w" ? 1 : 2)) return;
-  chess.undo(); if (chess.turn() !== me) chess.undo();
-  selected = hint = null; $("info").textContent = ""; render();
-};
+sf.postMessage('uci');
+let chain=Promise.resolve();
+const cache={};
+function ensure(fen){
+  if(cache[fen]) return Promise.resolve();
+  chain=chain.then(()=>new Promise(res=>{
+    job={res:r=>{cache[fen]=r;res();},score:{t:'cp',v:0}};
+    sf.postMessage('position fen '+fen); sf.postMessage('go depth 13');
+  }));
+  return chain;
+}
 
-initEngine().then(newGame).catch(e => $("status").textContent = "Error: " + e.message);
+/* ---------- Game state ---------- */
+let S={uci:[],status:'created',white:'?',black:'?',username:'',view:0,follow:true};
+let fens=[],sans=[],running=false,abort=null;
+const live=()=>['created','started'].includes(S.status);
+const assist=()=>document.getElementById('agreed').checked;
+
+function rebuild(){
+  const c=new Chess(); fens=[c.fen()]; sans=[];
+  for(const u of S.uci){
+    const m=c.move({from:u.slice(0,2),to:u.slice(2,4),promotion:u[4]});
+    sans.push(m?m.san:u); fens.push(c.fen());
+  }
+}
+function setMoves(movesStr,status){
+  S.uci=movesStr.trim()?movesStr.trim().split(/\s+/):[]; S.status=status;
+  rebuild(); if(S.follow) S.view=S.uci.length;
+  render(); runQueue();
+}
+async function runQueue(){
+  if(running) return; running=true;
+  try{
+    let again=true;
+    while(again){
+      again=false;
+      const n=S.uci.length;
+      for(let k=0;k<n;k++){ await ensure(fens[k]); render(); }
+      if(!live()||assist()){ await ensure(fens[n]); render(); }
+      if(S.uci.length!==n) again=true;
+    }
+  } finally{ running=false; }
+}
+function analyseHere(){
+  if(live()&&!assist()){ alert('Tick "My opponent agreed to engine help" to get suggestions during a live game.'); return; }
+  ensure(fens[S.view]).then(render);
+}
+
+/* ---------- Rendering ---------- */
+const P={wk:'♔',wq:'♕',wr:'♖',wb:'♗',wn:'♘',wp:'♙',bk:'♚',bq:'♛',br:'♜',bb:'♝',bn:'♞',bp:'♟'};
+const flipped=()=>S.username && S.black.toLowerCase()===S.username.toLowerCase();
+function xy(sq){
+  const f=sq.charCodeAt(0)-97,r=+sq[1]-1;
+  return flipped()?[7-f+.5,r+.5]:[f+.5,7-r+.5];
+}
+function arrow(uci,id,color){
+  const [x1,y1]=xy(uci.slice(0,2)),[x2,y2]=xy(uci.slice(2,4));
+  return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width=".14" opacity=".85" marker-end="url(#${id})"/>`;
+}
+function toSan(fen,uci){
+  const t=new Chess(fen),m=t.move({from:uci.slice(0,2),to:uci.slice(2,4),promotion:uci[4]});
+  return m?m.san:uci;
+}
+function scoreText(r,fen){
+  if(!r) return '';
+  const sign=fen.split(' ')[1]==='b'?-1:1, v=r.v*sign;
+  return r.t==='mate'?('M'+v):((v>=0?'+':'')+(v/100).toFixed(2));
+}
+function render(){
+  document.getElementById('info').textContent=`${S.white} (white) vs ${S.black} (black) - ${S.status}`;
+  const c=new Chess(fens[S.view]||undefined);
+  const files=flipped()?[7,6,5,4,3,2,1,0]:[0,1,2,3,4,5,6,7];
+  const ranks=flipped()?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];
+  let h='';
+  for(const r of ranks)for(const f of files){
+    const sq='abcdefgh'[f]+r, p=c.get(sq);
+    h+=`<div class="sq ${(f+r)%2?'l':'d'}">${p?P[p.color+p.type]:''}</div>`;
+  }
+  document.getElementById('board').innerHTML=h;
+
+  let a='';
+  if(S.view>=1){
+    const played=S.uci[S.view-1], rv=cache[fens[S.view-1]];
+    a+=arrow(played,'mo','#ff851b');
+    if(rv&&rv.best!==played.slice(0,4)&&rv.best!==played) a+=arrow(rv.best,'mg','#2ecc40');
+  }
+  const here=cache[fens[S.view]];
+  const allowed=!live()||assist();
+  const hasBest=allowed&&here&&here.best&&here.best!=='(none)';
+  if(hasBest) a+=arrow(here.best,'mg','#2ecc40');
+  document.getElementById('ag').innerHTML=a;
+
+  let bt='';
+  if(hasBest) bt='Best move now: '+toSan(fens[S.view],here.best)+'  ('+scoreText(here,fens[S.view])+')';
+  else if(!allowed) bt='Live suggestions are off. Tick the agreement box when your opponent has agreed.';
+  else if(S.uci.length||fens.length) bt='Analysing...';
+  document.getElementById('best').textContent=bt;
+
+  let m='';
+  for(let i=0;i<sans.length;i++){
+    const rv=cache[fens[i]]; let tag='...';
+    if(rv){
+      if(rv.best===S.uci[i]||rv.best===S.uci[i].slice(0,4)) tag='✓ best move';
+      else tag='best was '+toSan(fens[i],rv.best)+' ('+scoreText(rv,fens[i])+')';
+    }
+    const num=i%2===0?(i/2+1)+'. ':'';
+    m+=`<div class="mv ${S.view===i+1?'sel':''}" onclick="go(${i+1})">${num}${sans[i]} <small>${tag}</small></div>`;
+  }
+  document.getElementById('moves').innerHTML=m;
+}
+function go(i){ S.view=i; S.follow=(i===S.uci.length); render(); }
+function status(t){ document.getElementById('status').textContent=t; }
+
+/* ---------- Lichess API ---------- */
+async function ndjson(url,token,onObj,signal){
+  const r=await fetch(url,{headers:token?{Authorization:'Bearer '+token}:{},signal});
+  if(!r.ok) throw new Error(r.status+' '+r.statusText);
+  const rd=r.body.getReader(),dec=new TextDecoder(); let buf='';
+  while(true){
+    const {done,value}=await rd.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true}); let i;
+    while((i=buf.indexOf('\n'))>=0){
+      const line=buf.slice(0,i).trim(); buf=buf.slice(i+1);
+      if(line) onObj(JSON.parse(line));
+    }
+  }
+}
+const nm=p=>p?(p.name||p.id||('Stockfish level '+p.aiLevel)):'?';
+
+async function followGame(id,token){
+  status('Following game '+id+'...');
+  await ndjson('https://lichess.org/api/board/game/stream/'+id,token,o=>{
+    if(o.type==='gameFull'){
+      S.white=nm(o.white); S.black=nm(o.black); S.follow=true;
+      setMoves(o.state.moves,o.state.status);
+    } else if(o.type==='gameState'){ setMoves(o.moves,o.status); }
+  },abort.signal);
+  status('Game stream ended.');
+}
+
+async function loadFinished(id){
+  const r=await fetch('https://lichess.org/game/export/'+id+'?moves=true',{headers:{Accept:'application/json'}});
+  if(!r.ok) throw new Error(r.status+' '+r.statusText);
+  const g=await r.json();
+  S.white=nm(g.players.white.user||g.players.white); S.black=nm(g.players.black.user||g.players.black);
+  const c=new Chess(),u=[];
+  for(const san of g.moves.split(' ')){
+    const m=c.move(san,{sloppy:true}); if(!m) break;
+    u.push(m.from+m.to+(m.promotion||''));
+  }
+  S.follow=false;
+  setMoves(u.join(' '),g.status);
+  S.view=0; render();
+  status('Loaded finished game. Click a move to see the best-move arrow.');
+}
+
+async function start(){
+  if(abort) abort.abort(); abort=new AbortController();
+  const token=document.getElementById('token').value.trim();
+  const gid=document.getElementById('gid').value.trim().split('/').pop().slice(0,8);
+  const fin=document.getElementById('fin').checked;
+  S={uci:[],status:'created',white:'?',black:'?',username:'',view:0,follow:true};
+  try{
+    if(fin){ if(!gid) return status('Enter a game ID.'); return await loadFinished(gid); }
+    if(!token) return status('Enter your API token.');
+    const acc=await (await fetch('https://lichess.org/api/account',{headers:{Authorization:'Bearer '+token}})).json();
+    if(!acc.username) return status('Token not accepted by Lichess.');
+    S.username=acc.username;
+    if(gid) return await followGame(gid,token);
+    status('Connected as '+S.username+'. Start your game on Lichess and it will appear here.');
+    await ndjson('https://lichess.org/api/stream/event',token,o=>{
+      if(o.type==='gameStart') followGame(o.game.gameId||o.game.id,token).catch(e=>status('Error: '+e.message));
+    },abort.signal);
+  }catch(e){ if(e.name!=='AbortError') status('Error: '+e.message); }
+}
 </script></body></html>
