@@ -1,119 +1,129 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lichess Best Move</title>
+<title>Chess Practice</title>
 <style>
 body{font-family:sans-serif;background:#161512;color:#eee;max-width:480px;margin:auto;padding:16px}
-input,button{width:100%;padding:12px;margin:6px 0;font-size:16px;border-radius:8px;border:0;box-sizing:border-box}
+select,button{padding:10px;font-size:15px;border-radius:8px;border:0}
 button{background:#629924;color:#fff}
-#move{font-size:48px;text-align:center;margin:20px 0;font-weight:bold}
-#info{text-align:center;color:#aaa}
-small{color:#999}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+#board{display:grid;grid-template-columns:repeat(8,1fr);aspect-ratio:1;width:100%}
+.sq{display:flex;align-items:center;justify-content:center;font-size:min(10vw,44px);cursor:pointer;color:#000;padding:0;border-radius:0;aspect-ratio:1;line-height:1}
+.l{background:#f0d9b5}.d{background:#b58863}
+.sel{box-shadow:inset 0 0 0 4px #1565c0}.hint{box-shadow:inset 0 0 0 4px #2e7d32}
+.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000}
+#status,#info{text-align:center;margin:8px 0}
 </style></head><body>
-<h2>Lichess Best Move</h2>
-<small>For games vs the computer or friends who agreed. Never plays for you.</small>
-<input id="token" type="password" placeholder="Lichess token (board:play)">
-<button id="go">Start</button>
-<div id="status">Idle</div>
-<div id="move">-</div>
+<h2>Chess Practice vs Stockfish</h2>
+<div class="row">
+  <select id="color"><option value="w">White</option><option value="b">Black</option></select>
+  <select id="level"><option value="1">Easy</option><option value="8" selected>Medium</option><option value="20">Hard</option></select>
+  <button id="new">New game</button>
+  <button id="hintBtn">Best move</button>
+  <button id="undo">Undo</button>
+</div>
+<div id="status">Loading engine...</div>
+<div id="board"></div>
 <div id="info"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
 <script>
-const API = "https://lichess.org";
 const $ = id => document.getElementById(id);
-let engine, pendingResolve;
+const GLYPH = {p:"♟",n:"♞",b:"♝",r:"♜",q:"♛",k:"♚"};
+let engine, chess, me = "w", selected = null, hint = null, busy = true, gameNo = 0;
+let queue = Promise.resolve();
 
 async function initEngine() {
-  const url = "https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js";
-  const code = await (await fetch(url)).text();
-  engine = new Worker(URL.createObjectURL(new Blob([code], {type: "application/javascript"})));
-  let lastScore = "";
-  engine.onmessage = e => {
-    const l = typeof e.data === "string" ? e.data : "";
-    const m = l.match(/score (cp|mate) (-?\d+)/);
-    if (m) lastScore = m[1] === "cp" ? (m[2] / 100).toFixed(2) : "mate " + m[2];
-    if (l.startsWith("bestmove") && pendingResolve) {
-      pendingResolve({move: l.split(" ")[1], score: lastScore});
-      pendingResolve = null;
-    }
-  };
+  const r = await fetch("https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js");
+  if (!r.ok) throw new Error("Engine download failed: " + r.status);
+  engine = new Worker(URL.createObjectURL(new Blob([await r.text()], {type: "application/javascript"})));
   engine.postMessage("uci");
 }
 
-function bestMove(fen) {
-  return new Promise(res => {
-    pendingResolve = res;
-    engine.postMessage("stop");
+// Ek waqt mein sirf ek search, taake jawab mix na hon
+function search(fen, skill) {
+  const job = queue.then(() => new Promise(res => {
+    let score = "";
+    engine.onmessage = e => {
+      const l = String(e.data);
+      const m = l.match(/score (cp|mate) (-?\d+)/);
+      if (m) score = m[1] === "cp" ? (m[2] / 100).toFixed(2) : "mate " + m[2];
+      if (l.startsWith("bestmove")) res({move: l.split(" ")[1], score});
+    };
+    engine.postMessage("setoption name Skill Level value " + skill);
     engine.postMessage("position fen " + fen);
-    engine.postMessage("go movetime 1000");
-  });
+    engine.postMessage("go movetime 800");
+  }));
+  queue = job;
+  return job;
 }
 
-async function* ndjson(url, token) {
-  const r = await fetch(url, {headers: {Authorization: "Bearer " + token}});
-  if (!r.ok) throw new Error("Lichess error " + r.status);
-  const reader = r.body.getReader(), dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, {stream: true});
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-      if (line) yield JSON.parse(line);
-    }
+const parse = u => ({from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4]});
+
+function render() {
+  const b = $("board"); b.innerHTML = "";
+  for (let i = 0; i < 64; i++) {
+    const row = Math.floor(i / 8), col = i % 8;
+    const f = me === "w" ? col : 7 - col, rank = me === "w" ? 8 - row : row + 1;
+    const sq = "abcdefgh"[f] + rank, p = chess.get(sq);
+    const el = document.createElement("div");
+    el.className = "sq " + ((row + col) % 2 ? "d" : "l") + (p && p.color === "w" ? " w" : "") +
+      (sq === selected ? " sel" : "") + (hint && (sq === hint.from || sq === hint.to) ? " hint" : "");
+    el.textContent = p ? GLYPH[p.type] + "︎" : "";
+    el.dataset.sq = sq;
+    el.onclick = () => click(sq);
+    b.appendChild(el);
   }
+  $("status").textContent =
+    chess.in_checkmate() ? (chess.turn() === me ? "Checkmate, you lost" : "Checkmate, you won!") :
+    chess.game_over() ? "Draw" :
+    chess.turn() === me ? "Your turn" + (chess.in_check() ? " (check)" : "") : "Computer is thinking...";
 }
 
-async function playGame(gid, myId, token) {
-  let color, startFen = null;
-  for await (const ev of ndjson(API + "/api/board/game/stream/" + gid, token)) {
-    let state;
-    if (ev.type === "gameFull") {
-      color = ev.white.id === myId ? "w" : "b";
-      if (ev.initialFen && ev.initialFen !== "startpos") startFen = ev.initialFen;
-      state = ev.state;
-      $("status").textContent = "Game " + gid + ": you are " + (color === "w" ? "White" : "Black");
-    } else if (ev.type === "gameState") state = ev;
-    else continue;
-    if (state.status !== "started") { $("status").textContent = "Game ended: " + state.status; $("move").textContent = "-"; return; }
-    const chess = startFen ? new Chess(startFen) : new Chess();
-    for (const m of state.moves.split(" ").filter(Boolean))
-      chess.move({from: m.slice(0, 2), to: m.slice(2, 4), promotion: m[4]});
-    if (chess.turn() === color) {
-      $("move").textContent = "...";
-      const {move, score} = await bestMove(chess.fen());
-      const mv = chess.move({from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4]});
-      $("move").textContent = mv ? mv.san : move;
-      $("info").textContent = move + "  |  eval (side to move): " + score;
-    } else {
-      $("move").textContent = "Opponent's turn";
-      $("info").textContent = "";
-    }
-  }
+async function engineTurn() {
+  if (chess.game_over()) { busy = false; return; }
+  busy = true;
+  const id = gameNo;
+  const {move} = await search(chess.fen(), $("level").value);
+  if (id !== gameNo) return;
+  chess.move(parse(move));
+  busy = false; render();
 }
 
-$("go").onclick = async () => {
-  const token = $("token").value.trim();
-  if (!token) return alert("Enter your Lichess token");
-  try {
-    $("status").textContent = "Loading engine...";
-    await initEngine();
-    const me = await (await fetch(API + "/api/account", {headers: {Authorization: "Bearer " + token}})).json();
-    $("status").textContent = "Waiting for a game to start on Lichess...";
-      let current = null;
-    while (true) {
-      try {
-        const d = await (await fetch(API + "/api/account/playing", {headers: {Authorization: "Bearer " + token}})).json();
-        const g = d.nowPlaying && d.nowPlaying[0];
-        if (g && g.gameId !== current) {
-          current = g.gameId;
-          playGame(g.gameId, me.id, token).catch(e => $("status").textContent = "Error: " + e.message);
-        }
-      } catch (e) {}
-      await new Promise(r => setTimeout(r, 5000));
-    }
-  } catch (e) { $("status").textContent = "Error: " + e.message; }
+function click(sq) {
+  if (busy || chess.game_over() || chess.turn() !== me) return;
+  const p = chess.get(sq);
+  if (p && p.color === me) { selected = sq; return render(); }
+  if (!selected) return;
+  const mv = chess.move({from: selected, to: sq, promotion: "q"});
+  selected = null;
+  if (mv) { hint = null; $("info").textContent = ""; }
+  render();
+  if (mv) engineTurn();
+}
+
+function newGame() {
+  gameNo++; chess = new Chess(); me = $("color").value; selected = hint = null;
+  $("info").textContent = ""; busy = false; render();
+  if (me === "b") engineTurn();
+}
+
+$("new").onclick = () => { if (engine) newGame(); };
+$("hintBtn").onclick = async () => {
+  if (busy || chess.game_over()) return;
+  busy = true; $("info").textContent = "Thinking...";
+  const id = gameNo;
+  const {move, score} = await search(chess.fen(), 20);
+  if (id !== gameNo) return;
+  hint = parse(move);
+  const m = chess.move(hint); chess.undo();
+  busy = false; render();
+  $("info").textContent = "Best: " + m.san + "  |  eval: " + score;
 };
+$("undo").onclick = () => {
+  if (busy || chess.history().length < (me === "w" ? 1 : 2)) return;
+  chess.undo(); if (chess.turn() !== me) chess.undo();
+  selected = hint = null; $("info").textContent = ""; render();
+};
+
+initEngine().then(newGame).catch(e => $("status").textContent = "Error: " + e.message);
 </script></body></html>
